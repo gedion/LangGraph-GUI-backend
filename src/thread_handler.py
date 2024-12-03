@@ -20,17 +20,17 @@ class ThreadHandler:
             self.lock = threading.Lock()
             self.current_thread = None
 
-    def start_thread(self, target):
+    def start_thread(self, target, params):
         with self.lock:
             if self.current_thread and self.current_thread.is_alive():
                 raise Exception("Another instance is already running")
-            self.current_thread = threading.Thread(target=self._wrap_target(target))
+            self.current_thread = threading.Thread(target=self._wrap_target(target, params))
             self.current_thread.start()
 
-    def _wrap_target(self, target):
+    def _wrap_target(self, target, params):
         def wrapper():
             try:
-                target()
+                target(params)
             except Exception as e:
                 print(f"Thread crashed: {e}")
             finally:

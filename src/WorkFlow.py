@@ -1,22 +1,35 @@
-# WorkFlow.py
-
 import os
 import json
 import re
-
-from typing import Dict, List, TypedDict, Any, Annotated, Callable, Literal
-import operator
-import inspect
-from NodeData import NodeData
-from langchain_community.chat_models import ChatOllama
-from langchain_community.llms import Ollama
+from typing import Dict, List, TypedDict, Annotated, Callable, Literal
+from langchain_community.chat_models import ChatOpenAI, ChatOllama
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langgraph.graph import StateGraph, END, START
+from dotenv import load_dotenv
+from NodeData import NodeData
+from IPython.display import Image, display
+import inspect
+
+# Load variables from .env file
+load_dotenv()
 
 # Tool registry to hold information about tools
 tool_registry: Dict[str, Callable] = {}
 tool_info_registry: Dict[str, str] = {}
+
+import base64
+
+def get_image_tag_from_binary(png_binary: bytes) -> str:
+    """
+    Converts PNG binary data into a Base64-encoded image tag.
+    """
+    # Encode binary data as Base64
+    base64_data = base64.b64encode(png_binary).decode("utf-8")
+    
+    # Create the HTML <img> tag
+    img_tag = f'<img src="data:image/png;base64,{base64_data}" alt="Graph Visualization">'
+    return img_tag
 
 # Decorator to register tools
 def tool(func: Callable) -> Callable:
@@ -39,102 +52,72 @@ def load_nodes_from_json(filename: str) -> Dict[str, NodeData]:
 def find_nodes_by_type(node_map: Dict[str, NodeData], node_type: str) -> List[NodeData]:
     return [node for node in node_map.values() if node.type == node_type]
 
-# Clip the history to the last 16000 characters
-def clip_history(history: str, max_chars: int = 16000) -> str:
-    if len(history) > max_chars:
-        return history[-max_chars:]
-    return history
-
-class PipelineState(TypedDict):
-    history: Annotated[str, operator.add]
-    task: Annotated[str, operator.add]
+# Define State with messages
+class State(TypedDict):
+    messages: Annotated[list, lambda x, y: x + y]  # Append new messages to the list
     condition: Annotated[bool, lambda x, y: y]
 
-def execute_step(name:str, state: PipelineState, prompt_template: str, llm) -> PipelineState:
-    print(f"{name} is working...")
-    state["history"] = clip_history(state["history"])
-    
-    prompt = PromptTemplate.from_template(prompt_template)
-    llm_chain = prompt | llm | StrOutputParser()
-    inputs = {"history": state["history"]}
-    generation = llm_chain.invoke(inputs)
-    data = json.loads(generation)
-    
-    state["history"] += "\n" + json.dumps(data)
-    state["history"] = clip_history(state["history"])
-
-    return state
-
-def execute_tool(name: str, state: PipelineState, prompt_template: str, llm) -> PipelineState:
-
-    print(f"{name} is working...")
-
-    state["history"] = clip_history(state["history"])
-    
-    prompt = PromptTemplate.from_template(prompt_template)
-    llm_chain = prompt | llm | StrOutputParser()
-    inputs = {"history": state["history"]}
-    generation = llm_chain.invoke(inputs)
-
-    # Sanitize the generation output by removing invalid control characters
-    sanitized_generation = re.sub(r'[\x00-\x1F\x7F]', '', generation)
-
-    print(sanitized_generation)
-
-    data = json.loads(sanitized_generation)
-    
-    choice = data
-    tool_name = choice["function"]
-    args = choice["args"]
-    
-    if tool_name not in tool_registry:
-        raise ValueError(f"Tool {tool_name} not found in registry.")
-    
-    result = tool_registry[tool_name](*args)
-
-    # Flatten args to a string
-    flattened_args = ', '.join(map(str, args))
-
-    print(f"\nExecuted Tool: {tool_name}({flattened_args})  Result is: {result}")
-
-
-    state["history"] += f"\nExecuted {tool_name}({flattened_args})  Result is: {result}"
-    state["history"] = clip_history(state["history"])
-
-    return state
-
-def condition_switch(name:str, state: PipelineState, prompt_template: str, llm) -> PipelineState:
-    print(f"{name} is working...")
-
-    state["history"] = clip_history(state["history"])
-    
-    prompt = PromptTemplate.from_template(prompt_template)
-    llm_chain = prompt | llm | StrOutputParser()
-    inputs = {"history": state["history"]}
-    generation = llm_chain.invoke(inputs)
-
-    data = json.loads(generation)
-    
-    condition = data["switch"]
-    state["condition"] = condition
-    
-    state["history"] += f"\nCondition is {condition}"
-    state["history"] = clip_history(state["history"])
-
-    return state
-
-def conditional_edge(state: PipelineState) -> Literal["True", "False"]:
+def conditional_edge(state: State) -> Literal["True", "False"]:
     if state["condition"] in ["True", "true", True]:
         return "True"
     else:
         return "False"
+# Function to handle node execution
+def execute_step(name: str, state: State, prompt_template: str, llm) -> State:
+    print(f"{name} is working...")
+    messages = state["messages"]
 
+    # Generate prompt from messages
+    prompt = PromptTemplate.from_template(prompt_template)
+    llm_chain = prompt | llm | StrOutputParser()
+    inputs = {"messages": messages}
+    print('inputs')
+    generation = llm_chain.invoke(inputs)
+    # Add new message to state
+    new_message = json.loads(generation)
+    print('new_message ', new_message)
+    state["messages"].append(("system", new_message))
+    return state
+
+def create_step_node_executor(name: str, template: str, llm):
+    """
+    Creates a step node executor function.
+    """
+    def executor(state: State):
+        return execute_step(name, state, template, llm)
+    return executor
+
+def condition_switch(name: str, state: State, prompt_template: str, llm) -> State:
+    print(f"{name} is working...")
+
+    # Extract and format messages for the prompt
+    messages = state["messages"]
+    
+    # Generate the prompt
+    prompt = PromptTemplate.from_template(prompt_template)
+    llm_chain = prompt | llm | StrOutputParser()
+    inputs = {"messages": messages}
+    generation = llm_chain.invoke(inputs)
+
+    # Parse the LLM output
+    data = json.loads(generation)
+    condition = data.get("switch", False)
+
+    # Update state with the condition result and new system message
+    state["messages"].append(("system", f"Condition is {condition}"))
+    state["condition"] = condition
+
+    return state
+
+
+# Workflow runner
 def RunWorkFlow(node_map: Dict[str, NodeData], llm):
     # Define the state machine
-    workflow = StateGraph(PipelineState)
+    workflow = StateGraph(State)
 
     # Start node, only one start point
     start_node = find_nodes_by_type(node_map, "START")[0]
+    print('start_node ', start_node)
     print(f"Start root ID: {start_node.uniq_id}")
 
     # Step nodes
@@ -143,7 +126,7 @@ def RunWorkFlow(node_map: Dict[str, NodeData], llm):
         if current_node.tool:
             tool_info = tool_info_registry[current_node.tool]
             prompt_template = f"""
-            history: {{history}}
+            messages: {{messages}}
             {current_node.description}
             Available tool: {tool_info}
             Based on Available tool, arguments in the json format:
@@ -152,19 +135,26 @@ def RunWorkFlow(node_map: Dict[str, NodeData], llm):
             next stage directly parse then run <func_name>(<arg1>,<arg2>, ...) make sure syntax is right json and align function siganture
             """
             workflow.add_node(
-                current_node.uniq_id, 
-                lambda state, template=prompt_template, llm=llm, name=current_node.name : execute_tool(name, state, template, llm)
+                current_node.uniq_id,
+                create_step_node_executor(
+                    name=current_node.name,
+                    template=prompt_template,
+                    llm=llm
+                )
             )
         else:
-            prompt_template=f"""
-            history: {{history}}
+            prompt_template = f"""
+            messages: {{messages}}
             {current_node.description}
             """
             workflow.add_node(
-                current_node.uniq_id, 
-                lambda state, template=prompt_template, llm=llm, name=current_node.name: execute_step(name, state, template, llm)
+                current_node.uniq_id,
+                create_step_node_executor(
+                    name=current_node.name,
+                    template=prompt_template,
+                    llm=llm
+                )
             )
-
     # Edges
     # Find all next nodes from start_node
     next_node_ids = start_node.nexts
@@ -186,7 +176,7 @@ def RunWorkFlow(node_map: Dict[str, NodeData], llm):
     condition_nodes = find_nodes_by_type(node_map, "CONDITION")
     for condition in condition_nodes:
         condition_template = f"""{condition.description}
-        history: {{history}}, decide the condition result in the json format:
+        messages: {{messages}}, decide the condition result in the json format:
         "switch": True/False
         """
         workflow.add_node(
@@ -205,25 +195,25 @@ def RunWorkFlow(node_map: Dict[str, NodeData], llm):
                 "False": condition.false_next if condition.false_next else END
             }
         )
-
-    initial_state = PipelineState(
-        history="",
-        task="",
-        condition=False
-    )
-
+        
+    initial_state = State(messages=[("user", "hello")])
     app = workflow.compile()
+    png_binary = get_image_tag_from_binary(app.get_graph().draw_mermaid_png())
+    print(png_binary)
     for state in app.stream(initial_state):
         print(state)
 
-def run_workflow_as_server():
-    node_map = load_nodes_from_json("graph.json")
-
-    # Register the tool functions dynamically
+def run_workflow_as_server(params):
+    print('params ', params['file'])
+    node_map = load_nodes_from_json(params['file'])
+    print('node_map ', node_map)
+    # Register tool functions dynamically
     for tool in find_nodes_by_type(node_map, "TOOL"):
         tool_code = f"{tool.description}"
         exec(tool_code, globals())
-
-    llm = Ollama(model="gemma2", format="json", temperature=0)
+    llm = ChatOpenAI(
+        model="gpt-4o-mini", 
+        temperature=0
+        )
 
     RunWorkFlow(node_map, llm)

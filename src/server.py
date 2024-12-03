@@ -16,9 +16,9 @@ app.register_blueprint(file_transmit_bp)  # Register the Blueprint
 server_tee = ServerTee("server.log")
 thread_handler = ThreadHandler.get_instance()
 
-def server_func():
+def server_func(params):
     try:
-        run_workflow_as_server()
+        run_workflow_as_server(params)
     except Exception as e:
         print(str(e))
         raise
@@ -28,9 +28,19 @@ def run_script():
     if thread_handler.is_running():
         return "Another instance is already running", 409
 
+    # Grab the body parameters
+    try:
+        if request.is_json:  # Check if the request is JSON
+            body_params = request.get_json()
+        else:  # Fallback for form-encoded data
+            body_params = request.form.to_dict()
+        print("Received body parameters:", body_params)
+    except Exception as e:
+        return jsonify({"error": "Invalid request body", "details": str(e)}), 400
+    print('body_params ', body_params)
     def generate():
         try:
-            thread_handler.start_thread(target=server_func)
+            thread_handler.start_thread(target=server_func, params=body_params)
             yield from server_tee.stream_to_frontend()
         except Exception as e:
             print(str(e))
